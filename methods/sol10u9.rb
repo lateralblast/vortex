@@ -1,4 +1,23 @@
-def define_parameters_sol10u9()
+
+# Name:         sol10u9 (Solaris 10 Update 9 automation script)
+# Version:      1.0.1
+# Release:      1
+# License:      Open Source
+# Group:        System
+# Source:       N/A
+# URL:          http://lateralblast.com.au/
+# Distribution: UNIX
+# Vendor:       Lateral Blast
+# Packager:     Richard Spindler <richard@lateralblast.com.au>
+# Description:  Ruby script wrapper for creating and running
+#               Virtual Box VMs in headless mode
+
+# Changes:      1.0.0 Tue 20 Nov 2012 16:37:37 EST
+#               Initial version
+#               1.0.1 Mon  3 Dec 2012 15:51:24 EST
+#               Partially working version
+
+def define_parameters_sol10u9
   iso_file="#{$iso_dir}/sol-10-u9-ga-x86-serial-dvd.iso"
   os_type="Solaris_64"
   memory_size="1024"

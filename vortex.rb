@@ -1,7 +1,7 @@
 #!/usr/local/bin/ruby
 
 # Name:         vortex (VBoxManage ORchestration Tool EXtender)
-# Version:      1.0.5
+# Version:      1.0.6
 # Release:      1
 # License:      Open Source
 # Group:        System
@@ -25,12 +25,15 @@
 #               Replaced case statement with if statements
 #               1.0.5 Mon  3 Dec 2012 12:47:47 EST
 #               Initial commit
+#               1.0.6 Mon  3 Dec 2012 15:51:24 EST
+#               Updated version with remote version checking
 
 require 'rubygems'
 require 'pty'
 require 'expect'
 require 'getopt/std'
 require 'socket'
+require 'open-uri'
 
 class String
   def strip_control_characters()
@@ -74,6 +77,16 @@ def send_to_socket(string,line,socket,session_log)
   end
 end
 
+# Get code name
+
+def get_code_name
+  command="cat #{$0} |grep '^# Name' |awk '{print $3}'"
+  $code_name=%x[#{command}]
+  $code_name.chomp!
+end
+
+get_code_name
+
 # Load methods
 
 if Dir.exists?("./methods")
@@ -90,7 +103,7 @@ end
 def print_usage
   script_name=$0
   puts
-  puts "Usage: #{script_name} -[n|r] -[b|c|d|e|f|h|i|j|l|m|n|o|v|y|z]"
+  puts "Usage: #{$code_name} -[n|r] -[b|c|d|e|f|h|i|j|l|m|n|o|u|v|y|z]"
   puts
   puts "-h: Print help"
   puts "-d: Disk size"
@@ -115,7 +128,9 @@ def print_usage
   puts
   puts "#{script_name} -n sol10u9vm01 -f sol10u9 -m"
   puts
-  puts "Example: Build VM named sol10u9vm01 in headless mode with predefined sol10u9 method and connect to console"
+  puts "Example: Build VM named sol10u9vm01 in headless mode with"
+  puts "predefined sol10u9 method and connect to console"
+  puts "(methods are ruby code and reside in methods directory)"
   puts
   puts "#{script_name} -n sol10u9vm01 -f sol10u9 -b"
   puts
@@ -133,7 +148,7 @@ end
 # Get command line options and handle exception for incorrect options
 
 begin
-  opt = Getopt::Std.getopts("n:c:i:d:f:o:behlmOrsvVyz")
+  opt = Getopt::Std.getopts("n:c:i:d:f:o:behlmOrsuvVyz")
 rescue
   print_usage
 end
@@ -215,9 +230,8 @@ end
 # If given -v print version infomration
 
 if opt["v"]
-  command="cat #{$0} |grep '^# Version' |awk '{print $3}'"
-  version_string=%x[#{command}]
-  puts version_string
+  local_version=get_local_version
+  puts local_version
   exit
 end
 
@@ -276,6 +290,43 @@ end
 
 if opt["y"]
   $yes_to_all=1
+end
+
+# Code to update script from git
+
+def get_local_version
+  command="cat #{$0} |grep '^# Version' |awk '{print $3}'"
+  local_version=%x[#{command}]
+  return local_version
+end
+
+def update_script
+  local_version=get_local_version
+  file=open("https://github.com/richardatlateralblast/#{$code_name}/raw/master/version")
+  remote_version=file.read
+  puts
+  puts "Checking for updated version of script..."
+  puts
+  puts "Local version:  #{local_version}"
+  puts "Remote version: #{remote_version}"
+  puts
+  local_int=local_version.gsub(/\./,"")
+  remote_int=remote_version.gsub(/\./,"")
+  local_int=local_int.to_i
+  remote_int=remote_int.to_i
+  if remote_int == local_int
+    puts "Remote and local versions of #{$code_name} are the same"
+  end
+  if remote_int > local_int
+    puts "Remote version of #{$code_name} is greater"
+  end
+  puts
+  return
+end
+
+if opt["u"]
+  update_script
+  exit
 end
 
 # If given -r remove VM
