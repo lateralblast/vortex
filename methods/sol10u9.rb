@@ -1,8 +1,8 @@
 
 # Name:         sol10u9 (Solaris 10 Update 9 automation script)
-# Version:      1.0.1
+# Version:      1.0.7
 # Release:      1
-# License:      Open Source
+# License:      CC BY-NC-SA 4.0
 # Group:        System
 # Source:       N/A
 # URL:          http://lateralblast.com.au/
@@ -16,6 +16,18 @@
 #               Initial version
 #               1.0.1 Mon  3 Dec 2012 15:51:24 EST
 #               Partially working version
+#               1.0.2 Sat  3 Oct 2026
+#               Replaced File.exists? with File.exist?
+#               1.0.3 Sat  3 Oct 2026
+#               Fixed nil session log in non-debug mode
+#               1.0.4 Sat  3 Oct 2026
+#               Fixed domain answer escape sequence
+#               1.0.5 Sat  3 Oct 2026
+#               Use the result of control character stripping
+#               1.0.6 Sat  3 Oct 2026
+#               Wait for the serial socket to appear
+#               1.0.7 Sat  3 Oct 2026
+#               Treat $verbose as a boolean and close the session log
 
 def define_parameters_sol10u9
   iso_file="#{$iso_dir}/sol-10-u9-ga-x86-serial-dvd.iso"
@@ -27,28 +39,38 @@ def define_parameters_sol10u9
 end
 
 def process_serial_sol10u9(host_name,host_value)
-  if $verbose == 1
+  session_log = nil
+  if $verbose
     session_log_file="/tmp/#{host_name}.session.log"
-    if File.exists?(session_log_file)
+    if File.exist?(session_log_file)
       File.delete(session_log_file)
     end
     session_log = File.new(session_log_file,'w')
     puts "Logging to: #{session_log_file}"
   end
-  begin
-    socket=UNIXSocket.open("/tmp/#{host_name}")
-  rescue
+  socket = nil
+  30.times do
+    begin
+      socket = UNIXSocket.open("/tmp/#{host_name}")
+      break
+    rescue
+      sleep 1
+    end
+  end
+  if socket.nil?
     puts "Cannot open socket"
     exit
   end
   socket.each_line do |line|
   	puts line
-    if $verbose == 1
+    if $verbose
       sleep 0.05
     end
-    line.strip_control_and_extended_characters
-    session_log.puts(line)
-    session_log.flush
+    line = line.strip_control_and_extended_characters
+    if session_log
+      session_log.puts(line)
+      session_log.flush
+    end
   	if line =~ /Enter the number of your choice/
       send_to_socket("4",line,socket,session_log)
   	end
@@ -123,8 +145,9 @@ def process_serial_sol10u9(host_name,host_value)
     end
     if line =~ /domain where this system resides/
       string=host_value['domain']
-      string="#{string}\0322"
+      string="#{string}\0332"
       send_to_socket(string,line,socket,session_log)
     end
   end
+  session_log.close if session_log
 end

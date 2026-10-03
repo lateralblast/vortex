@@ -13,12 +13,21 @@ Ruby script wrapper for creating and running Virtual Box VMs in headless mode.
 This requires a serial console to be enabled on the VM. It connects via a socket
 and drives an OS install.
 
+Version
+-------
+
+Current version: 0.3.2
+
+See CHANGELOG.md for the history of changes.
+
 License
 -------
 
-This software is licensed as CC-BA (Creative Commons By Attrbution)
+This software is licensed as CC BY-NC-SA 4.0 (Creative Commons Attribution-NonCommercial-ShareAlike)
 
-http://creativecommons.org/licenses/by/4.0/legalcode
+https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+See the LICENSE file.
 
 Usage
 -----
@@ -30,6 +39,9 @@ $ vortex -[n|r] -[b|c|d|e|f|h|i|j|l|m|n|o|u|v|y|z]
 -d: Disk size
 -c: Disk controller type
 -r: Memory size
+-l: List VMs
+-u: Check for updated version
+-O: Convert a character to octal
 -f: Use a predefined OS type (from methods directory)
 -o: Operating System
 -m: Create/Make VM (Instantiate a VM)
@@ -77,9 +89,15 @@ Requirements
 
 Ruby gems:
 
-- rubygems
-- pty
-- expect
-- getopt/std
+- getopt (provides getopt/std, see Gemfile)
 - socket
 - open-uri
+
+VirtualBox (VBoxManage in PATH)
+
+Help Support Development
+------------------------
+
+If you find this software useful and would like to support its development, please consider buying me a coffee:
+
+https://ko-fi.com/richardatlateralblast

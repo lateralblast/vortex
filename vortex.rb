@@ -1,10 +1,11 @@
 #!/usr/bin/env ruby
+# frozen_string_literal: true
 
 # Name:         vortex (VBoxManage ORchestration Tool EXtender)
-# Version:      0.0.8
+# Version:      0.3.2
 # Release:      1
-# License:      CC-BA (Creative Commons By Attrbution)
-#               http://creativecommons.org/licenses/by/4.0/legalcode
+# License:      CC BY-NC-SA 4.0 (Creative Commons Attribution-NonCommercial-ShareAlike)
+#               https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
 # Group:        System
 # Source:       N/A
 # URL:          http://lateralblast.com.au/
@@ -14,628 +15,453 @@
 # Description:  Ruby script wrapper for creating and running
 #               Virtual Box VMs in headless mode
 
-require 'rubygems'
-require 'pty'
-require 'expect'
 require 'getopt/std'
-require 'socket'
 require 'open-uri'
+require 'socket'
+
+# Strip helpers used by the OS methods on serial console output
 
 class String
-  def strip_control_characters()
-    self.chars.inject("") do |str, char|
-      unless char.ascii_only? and (char.ord < 32 or char.ord == 127)
-        str << char
-      end
-      str
-    end
+  def strip_control_characters
+    scrub('').gsub(/[\u0000-\u001f\u007f]/, '')
   end
-  def strip_control_and_extended_characters()
-    self.chars.inject("") do |str, char|
-      if char.ascii_only? and char.ord.between?(32,126)
-        str << char
-      end
-      str
-    end
+
+  def strip_control_and_extended_characters
+    scrub('').gsub(/[^ -~]/, '')
   end
 end
 
-# Global variables
+SCRIPT_PATH = File.realpath(__FILE__)
+METHODS_DIR = File.join(File.dirname(SCRIPT_PATH), 'methods')
+HEADER_SIZE = 13
+OPTIONS     = 'n:c:i:d:f:o:r:behlmOsuvVyz'
 
-$iso_dir             = "/Users/spindler/Documents/ISOs"
-$sol10u9_iso         = "#{$iso_dir}/sol-10-u9-ga-x86-serial-dvd.iso"
-$default_memory_size = "1024"
-$default_disk_size   = "10000"
-$default_disk_type   = "ide"
-$verbose             = 0
+DEFAULT_MEMORY_SIZE = '1024'
+DEFAULT_DISK_SIZE   = '10000'
+DEFAULT_DISK_TYPE   = 'ide'
+DEFAULT_CONTROLLER  = 'PIIX4'
+CONTROLLERS         = { 'ide' => 'PIIX4', 'sata' => 'IntelAhci', 'scsi' => 'LsiLogic' }.freeze
+
+HOST_PROMPTS = {
+  'ip'          => { label: 'IP Address', default: '192.168.1.2' },
+  'netmask'     => { label: 'Netmask', default: '255.255.255.0' },
+  'gateway'     => { label: 'Gateway', default: '192.168.1.254' },
+  'domain'      => { label: 'Domain', default: 'home.net' },
+  'nameservice' => { label: 'Name Service', default: 'DNS', valid: %w[NIS+ NIS DNS LDAP None] },
+  'nameserver'  => { label: 'Name Server', default: '192.168.1.254' },
+  'timezone'    => { label: 'Time Zone', default: 'Australia' },
+  'region'      => { label: 'Geographic Region', default: 'Australasia' },
+  'state'       => { label: 'State', default: 'Victoria' },
+  'password'    => { label: 'Password', default: 'penguins' },
+  'filesystem'  => { label: 'Filesystem', default: 'ZFS', valid: %w[ZFS UFS] }
+}.freeze
+IP_FIELDS = %w[ip netmask gateway nameserver].freeze
+
+# Globals shared with the OS methods in the methods directory
+
+$iso_dir    = '/Users/spindler/Documents/ISOs'
+$verbose    = false
+$yes_to_all = false
+
+# Get a value from the script header (e.g. Name, Version)
+
+def header_value(key)
+  File.foreach(SCRIPT_PATH) do |line|
+    return Regexp.last_match(1) if line =~ /^# #{key}:\s+(\S+)/
+  end
+  nil
+end
+
+CODE_NAME = header_value('Name')
+VERSION   = header_value('Version')
+
+Dir.glob(File.join(METHODS_DIR, '*.rb')).sort.each { |file| require file }
+
+# Print an error to stderr and exit with failure
+
+def die(message)
+  warn message
+  exit 1
+end
+
+def debug(message)
+  puts message if $verbose
+end
 
 # Routine to send output to serial socket and log
 
-def send_to_socket(string,line,socket,session_log)
-  socket.puts("#{string}")
+def send_to_socket(string, line, socket, session_log)
+  socket.puts(string)
   socket.flush
-  if $verbose == 1
-    if line =~ /[A-z]/
-      session_log.puts("FOUND: '#{line}'")
-    end
-    session_log.puts("SENT:  '#{string}'")
-    session_log.flush
-  end
-end
+  return unless $verbose && session_log
 
-# Get code name
-
-def get_code_name
-  command    = "cat #{$0} |grep '^# Name' |awk '{print $3}'"
-  $code_name = %x[#{command}]
-  $code_name.chomp!
-end
-
-get_code_name
-
-# Load methods
-
-if Dir.exists?("./methods")
-  file_list = Dir.entries("./methods")
-  for file in file_list
-    if file =~/rb$/
-      require "./methods/#{file}"
-    end
-  end
+  session_log.puts("FOUND: '#{line}'") if line.match?(/[A-Za-z]/)
+  session_log.puts("SENT:  '#{string}'")
+  session_log.flush
 end
 
 # Print usage
 
-def print_usage
-  script_name=$0
-  puts
-  puts "Usage: #{$code_name} -[n|r] -[b|c|d|e|f|h|i|j|l|m|n|o|u|v|y|z]"
-  puts
-  puts "-h: Print help"
-  puts "-d: Disk size"
-  puts "-c: Disk controller type"
-  puts "-r: Memory size"
-  puts "-f: Use a predefined OS type (from methods directory)"
-  puts "-o: Operating System"
-  puts "-m: Create/Make VM (Instantiate a VM)"
-  puts "-n: Name of host"
-  puts "-b: Build VM (Install OS)"
-  puts "-s: Shutdown VM"
-  puts "-V: Print verbose version"
-  puts "-v: Print version"
-  puts "-z: Run in debug mode (verbose output and/or logging)"
-  puts "-e: Destroy VM"
-  puts "-i: Attach ISO"
-  puts "-y: Answer yes to questions"
-  puts
-  puts "Defaults: Memory=#{$default_memory_size}"
-  puts
-  puts "Example: Create a predefined  VM with hostname sol10u9vm01"
-  puts
-  puts "#{script_name} -n sol10u9vm01 -f sol10u9 -m"
-  puts
-  puts "Example: Build VM named sol10u9vm01 in headless mode with"
-  puts "predefined sol10u9 method and connect to console"
-  puts "(methods are ruby code and reside in methods directory)"
-  puts
-  puts "#{script_name} -n sol10u9vm01 -f sol10u9 -b"
-  puts
-  puts "Example: Destroy VM named sol10u9vm01"
-  puts
-  puts "#{script_name} -n sol10u9vm01 -e"
-  puts
-  puts "Example: Shutdown VM named sol10u9vm01"
-  puts
-  puts "#{script_name} -n sol10u9vm01 -s"
-  puts
-  exit
+def print_usage(status = 0)
+  script_name = $PROGRAM_NAME
+  puts <<~USAGE
+
+    Usage: #{CODE_NAME} -n <host name> -[b|e|i|l|m|O|s|u|v|V] [-c|-d|-f|-o|-r|-y|-z]
+
+    -h: Print help
+    -d: Disk size
+    -c: Disk controller type
+    -r: Memory size
+    -f: Use a predefined OS type (from methods directory)
+    -o: Operating System (list: print available types)
+    -m: Create/Make VM (Instantiate a VM)
+    -n: Name of host
+    -b: Build VM (Install OS)
+    -s: Shutdown VM
+    -l: List VMs
+    -u: Check for updated version
+    -O: Convert a character to octal
+    -V: Print verbose version
+    -v: Print version
+    -z: Run in debug mode (verbose output and/or logging)
+    -e: Destroy VM
+    -i: Attach ISO
+    -y: Answer yes to questions
+
+    Defaults: Memory=#{DEFAULT_MEMORY_SIZE} Disk=#{DEFAULT_DISK_SIZE} Controller=#{DEFAULT_DISK_TYPE}
+
+    Example: Create a predefined  VM with hostname sol10u9vm01
+
+    #{script_name} -n sol10u9vm01 -f sol10u9 -m
+
+    Example: Build VM named sol10u9vm01 in headless mode with
+    predefined sol10u9 method and connect to console
+    (methods are ruby code and reside in methods directory)
+
+    #{script_name} -n sol10u9vm01 -f sol10u9 -b
+
+    Example: Destroy VM named sol10u9vm01
+
+    #{script_name} -n sol10u9vm01 -e
+
+    Example: Shutdown VM named sol10u9vm01
+
+    #{script_name} -n sol10u9vm01 -s
+
+  USAGE
+  exit status
 end
 
-# Get command line options and handle exception for incorrect options
-
-begin
-  opt = Getopt::Std.getopts("n:c:i:d:f:o:behlmOrsuvVyz")
-rescue
-  print_usage
+def print_verbose_version
+  lines = File.readlines(SCRIPT_PATH, chomp: true)
+  start = lines.index { |line| line.start_with?('# Name') }
+  puts
+  puts lines[start, HEADER_SIZE].map { |line| line.sub(/\A#/, '') }
+  puts
 end
 
-# If give no command line options print help
+# Convert a character to octal
 
-if opt.empty?
-  print_usage
+def print_octal
+  print 'Input character: '
+  char = ($stdin.gets || '').chomp
+  die 'No character given' if char.empty?
+
+  puts format('%03o', char.ord)
 end
 
-# Convert a code to octal
+# Routines to run VBoxManage without a shell, so arguments are never interpreted
 
-if opt["O"]
-  print "Input character: "
-  char = gets.chomp
-  exit
+def vbox(*args)
+  debug("Executing: VBoxManage #{args.join(' ')}")
+  result = system('VBoxManage', *args)
+  die 'VBoxManage not found: is VirtualBox installed?' if result.nil?
+  result
 end
 
-# Set verbose flag if given -z
-
-if opt["z"]
-  $verbose = 1
+def vbox!(*args)
+  vbox(*args) || die("VBoxManage #{args.first} failed")
 end
 
-# Routine to attach CD/DVDROM (ISO) to VM
+def vbox_output(*args)
+  IO.popen(['VBoxManage', *args], &:read)
+rescue Errno::ENOENT
+  die 'VBoxManage not found: is VirtualBox installed?'
+end
 
-def attach_cd_to_vm(host_name,iso_file)
-  disk_type = "ide"
-  if host_name !~ /[A-z]/
-    puts "Host name of VM must be specified"
-    return
+# Routines to check VM names and state (exact name match)
+
+def require_host_name(host_name)
+  return if host_name&.match?(/[A-Za-z0-9]/)
+
+  die 'Host name of VM must be specified (-n)'
+end
+
+def vm_names(kind = 'vms')
+  vbox_output('list', kind).scan(/^"(.*)" \{/).flatten
+end
+
+def vm_registered?(host_name)
+  vm_names.include?(host_name)
+end
+
+def vm_running?(host_name)
+  vm_names('runningvms').include?(host_name)
+end
+
+def check_vm_exists(host_name)
+  require_host_name(host_name)
+  die "VM #{host_name} does not exist" unless vm_registered?(host_name)
+end
+
+def check_vm_doesnt_exist(host_name)
+  require_host_name(host_name)
+  die "VM #{host_name} already exists" if vm_registered?(host_name)
+end
+
+# Routine to ask a yes/no question ($yes_to_all answers yes)
+
+def confirm(prompt)
+  return true if $yes_to_all
+
+  answer = ''
+  until answer.match?(/\A[yn]\z/i)
+    print prompt
+    answer = ($stdin.gets || 'n').chomp
   end
-  if ! File.exists?(iso_file)
-    puts "File: #{iso_file} does not exist"
-    return
-  end
-  command = "VBoxManage storageattach \"#{host_name}\" --storagectl \"#{disk_type}\" --port 0 --device 1 --type dvddrive --medium \"#{iso_file}\""
-  system("#{command}")
+  answer.casecmp?('y')
 end
 
-# If given -i attach CD/DVDROM (ISO) to VM
-# Requires -n (VM name) also
+# Routine to check an OS method (from methods directory) exists
 
-if opt["i"]
-  iso_file  = opt["i"]
-  host_name = opt["n"]
-  attach_cd_to_vm(host_name,iso_file)
-  exit
-end
+def check_method(os_type)
+  name = os_type.to_s
+  return if name.match?(/\A\w+\z/) &&
+            respond_to?("define_parameters_#{name}", true) &&
+            respond_to?("process_serial_#{name}", true)
 
-# If given -h print help
-
-if opt["h"]
-  print_usage
-end
-
-# If given -V print verbose version information
-
-if opt["V"]
-  command     = "cat #{$0} |grep -A 12 '^# Name' |sed 's/^#//g'"
-  info_string = %x[#{command}]
-  puts
-  puts info_string
-  puts
-  exit
-end
-
-# List VMs
-
-if opt["l"]
-  command = "VBoxManage list vms"
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  exit
-end
-
-# If given -v print version infomration
-
-if opt["v"]
-  local_version=get_local_version
-  puts local_version
-  exit
+  die "Unknown OS method: #{os_type}"
 end
 
 # Routine to get VM directory
 
 def get_vm_dir(host_name)
-  command     = "VBoxManage list systemproperties |grep 'Default machine folder' |cut -f2 -d'':'' |sed 's/^[  ]*//g'"
-  vm_base_dir = %x[#{command}]
-  vm_base_dir = vm_base_dir.chomp
-  vm_dir      = "#{vm_base_dir}/#{host_name}"
-  return(vm_dir)
+  base_dir = vbox_output('list', 'systemproperties')[/^Default machine folder:\s*(.+)$/, 1]
+  die 'Cannot determine default machine folder' if base_dir.nil?
+
+  File.join(base_dir.strip, host_name)
 end
 
-def unregister_vm(host_name)
-  command " VBoxManage unregistervm #{host_name} --delete"
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return
+def get_controller(disk_type)
+  CONTROLLERS.fetch(disk_type, DEFAULT_CONTROLLER)
 end
 
 # Routine to remove VM
 
 def remove_vm(host_name)
-  if $yes_to_all == 1
-    answer = "y"
-  end
-  command   = "VBoxManage list vms"
-  host_list = %x[#{command}]
-  if !host_list.match(host_name)
-    puts "Host \"#{host_name}\" is not registered"
+  require_host_name(host_name)
+  if vm_registered?(host_name)
+    if confirm("Are you sure you want to delete VM #{host_name}? (y/n): ")
+      vbox!('unregistervm', host_name, '--delete')
+    end
   else
-    while answer !~/y|Y|n|N/
-      print "Are you sure you want to delete VM #{host_name}? (y/n): "
-      answer = gets.chomp
-    end
-    if answer =~ /y|Y/
-      unregister_vm(host_name)
-    end
+    puts "Host \"#{host_name}\" is not registered"
   end
-  vm_dir    = get_vm_dir(host_name)
-  vbox_file = "#{vm_dir}/#{host_name}.vbox"
-  if File.exists?(vbox_file)
-    while answer !~/y|Y|n|N/
-      puts "Found unregistered VM config file for #{host_name}"
-      print "Remove \"#{vbox_file}\"? (y/n)"
-      answer = gets.chomp
-    end
-    if answer =~ /y|Y/
-      system("rm \"#{vbox_file}\"")
-    end
-  end
-  return
-end
+  vbox_file = File.join(get_vm_dir(host_name), "#{host_name}.vbox")
+  return unless File.exist?(vbox_file)
 
-if opt["y"]
-  $yes_to_all = 1
-end
-
-# Code to update script from git
-
-def get_local_version
-  command       = "cat #{$0} |grep '^# Version' |awk '{print $3}'"
-  local_version = %x[#{command}]
-  return local_version
-end
-
-def update_script
-  local_version = get_local_version
-  file = open("https://github.com/richardatlateralblast/#{$code_name}/raw/master/version")
-  remote_version = file.read
-  puts
-  puts "Checking for updated version of script..."
-  puts
-  puts "Local version:  #{local_version}"
-  puts "Remote version: #{remote_version}"
-  puts
-  local_int  = local_version.gsub(/\./,"")
-  remote_int = remote_version.gsub(/\./,"")
-  local_int  = local_int.to_i
-  remote_int = remote_int.to_i
-  if remote_int == local_int
-    puts "Remote and local versions of #{$code_name} are the same"
-  end
-  if remote_int > local_int
-    puts "Remote version of #{$code_name} is greater"
-  end
-  puts
-  return
-end
-
-if opt["u"]
-  update_script
-  exit
-end
-
-# If given -r remove VM
-
-if opt["e"]
-  host_name = opt["n"]
-  remove_vm(host_name)
-  exit
-end
-
-# Check if a VM exists
-
-def check_vm_exists(host_name)
-  command   = "VBoxManage list vms"
-  host_list = %x[#{command}]
-  if !host_list.match(host_name)
-    puts "VM #{host_name} does not exist"
-    exit
-  end
-end
-
-# Check if a VM doesn't exist
-
-def check_vm_doesnt_exist(host_name)
-  command   = "VBoxManage list vms"
-  host_list = %x[#{command}]
-  if host_list.match(host_name)
-    puts "VM #{host_name} already exists"
-    exit
-  end
-end
-
-# Routine to remove CD from VM
-
-def remove_iso_from_vm(host_name)
-  command = "VBoxManage storageattach #{host_name} --storagectl ide --port 0 --device 1 --medium none"
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return
+  puts "Found unregistered VM config file for #{host_name}"
+  File.delete(vbox_file) if confirm("Remove \"#{vbox_file}\"? (y/n): ")
 end
 
 # Routine to shut down VM
 
 def shutdown_vm(host_name)
-  command   = "VBoxManage list runningvms |grep \"#{host_name}\" |awk '{print $1}'"
-  host_list = %x[#{command}]
-  if host_list =~ /#{host_name}/
-    command = "VBoxManage controlvm #{host_name} poweroff"
-    if $verbose == 1
-      puts "Executing: #{command}"
-    end
-    system("#{command}")
+  if vm_running?(host_name)
+    vbox!('controlvm', host_name, 'poweroff')
   else
-    if $verbose == 1
-      puts "VM #{host_name} already shudown"
-    end
+    debug("VM #{host_name} already shut down")
   end
-  return
 end
 
-# If given -s shutdown VM
+# Routines to create a VM
 
-if opt["s"]
-  host_name = opt["n"]
-  shutdown_vm(host_name)
-  exit
+def require_iso(iso_file)
+  die "ISO File: #{iso_file} does not exist" unless File.exist?(iso_file)
 end
 
-# Routine to get VM info
-
-def get_vm_value(hostname,option)
-  command   = ""
-  vm_config = vbox_cmd()
+def register_vm(host_name, os_type)
+  vbox!('createvm', '--name', host_name, '--ostype', os_type, '--register')
 end
 
-# Handle OS type
-# If given list as an option print a list of OS types
-
-if opt["o"] =~ /^list$/
-  system("VBoxManage list ostypes")
+def add_controller_to_vm(host_name, disk_type, controller)
+  vbox!('storagectl', host_name, '--name', disk_type, '--add', disk_type, '--controller', controller)
 end
 
-# If not give a disk type asume IDE
-
-if ! opt["c"]
-  opt["c"] = "ide"
+def create_hdd(disk_name, disk_size)
+  vbox!('createhd', '--filename', disk_name, '--size', disk_size.to_s)
 end
 
-# Routine to get controller type
-
-def get_controller(disk_type)
-  if disk_type =~/ide/
-    controller = "PIIX4"
-  end
-  if disk_type =~/sata/
-    controller = "IntelAhci"
-  end
-  if disk_type =~/scsi/
-    controller = "LsiLogic"
-  end
-  return(controller)
+def add_hdd_to_vm(host_name, disk_type, disk_name)
+  vbox!('storageattach', host_name, '--storagectl', disk_type, '--port', '0',
+        '--device', '0', '--type', 'hdd', '--medium', disk_name)
 end
 
-
-# Routine to register VM
-
-def register_vm(host_name,os_type)
-  command = "VBoxManage createvm --name \"#{host_name}\" --ostype \"#{os_type}\" --register"
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return
+def add_iso_to_vm(host_name, disk_type, iso_file)
+  require_iso(iso_file)
+  vbox!('storageattach', host_name, '--storagectl', disk_type, '--port', '0',
+        '--device', '1', '--type', 'dvddrive', '--medium', iso_file)
 end
 
-# Routine to add a controller to a VM
-
-def add_controller_to_vm(host_name,disk_type,controller)
-  command = "VBoxManage storagectl \"#{host_name}\" --name \"#{disk_type}\" --add \"#{disk_type}\" --controller \"#{controller}\""
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return
+def add_memory_to_vm(host_name, memory_size)
+  vbox!('modifyvm', host_name, '--memory', memory_size.to_s)
 end
-
-# Routine to create a disk
-
-def create_hdd(disk_name,disk_size)
-  command = "VBoxManage createhd --filename \"#{disk_name}\" --size \"#{disk_size}\""
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return
-end
-
-# Routine to add a hdd to a VM
-
-def add_hdd_to_vm(host_name,disk_type,disk_name)
-  command = "VBoxManage storageattach \"#{host_name}\" --storagectl \"#{disk_type}\" --port 0 --device 0 --type hdd --medium \"#{disk_name}\""
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return
-end
-
-# Routine to add an iso to a machie
-
-def add_iso_to_vm(host_name,disk_type,iso_file)
-  if ! File.exists?(iso_file)
-    puts "ISO File: #{iso_file} does not exist"
-    exit
-  end
-  command = "VBoxManage storageattach \"#{host_name}\" --storagectl \"#{disk_type}\" --port 0 --device 1 --type dvddrive --medium \"#{iso_file}\""
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return
-end
-
-# Routine to add memory to a VM
-
-def add_memory_to_vm(host_name,memory_size)
-  command = "VBoxManage modifyvm \"#{host_name}\" --memory \"#{memory_size}\""
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return
-end
-
-# Routine to add a socket to a VM
 
 def add_socket_to_vm(host_name)
-  socket_name = "/tmp/#{host_name}"
-  command     = "VBoxManage modifyvm \"#{host_name}\" --uartmode1 server #{socket_name}"
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return(socket_name)
+  vbox!('modifyvm', host_name, '--uartmode1', 'server', "/tmp/#{host_name}")
 end
 
-# Routine to add serial to a VM
-
 def add_serial_to_vm(host_name)
-  command = "VBoxManage modifyvm \"#{host_name}\" --uart1 0x3F8 4"
-  if $verbose == 1
-    puts "Executing: #{command}"
-  end
-  system("#{command}")
-  return
+  vbox!('modifyvm', host_name, '--uart1', '0x3F8', '4')
+end
+
+# Routine to attach CD/DVDROM (ISO) to VM
+
+def attach_cd_to_vm(host_name, iso_file)
+  require_host_name(host_name)
+  add_iso_to_vm(host_name, DEFAULT_DISK_TYPE, iso_file)
 end
 
 # Make/Create a VM - entire process
+# Command line options override the values from the OS method
 
-if opt["m"]
-  host_name = opt["n"]
-  if opt["f"]
-    os_type = opt["f"]
-    iso_file, os_type, memory_size, disk_size, disk_type = eval("define_parameters_#{os_type}")
+def create_vm(opt)
+  host_name = opt['n']
+  require_host_name(host_name)
+  iso_file = os_type = memory_size = disk_size = disk_type = nil
+  if opt['f']
+    check_method(opt['f'])
+    iso_file, os_type, memory_size, disk_size, disk_type = send("define_parameters_#{opt['f']}")
   end
-  if opt["o"]
-    os_type = opt["o"]
-  end
-  if opt["r"]
-    memory_size = opt["r"]
-  end
-  if opt["d"]
-    disk_size = opt["d"]
-  end
-  if opt["c"]
-    disk_type = opt["c"]
-  end
-  if opt["i"]
-    iso_file = opt["i"]
-  end
-  vm_dir      = get_vm_dir(host_name)
-  disk_name   = "#{vm_dir}/#{host_name}.vdi"
-  socket_name = "/tmp/#{host_name}"
-  controller  = get_controller(disk_type)
+  os_type     = opt['o'] || os_type
+  iso_file    = opt['i'] || iso_file
+  memory_size = opt['r'] || memory_size || DEFAULT_MEMORY_SIZE
+  disk_size   = opt['d'] || disk_size || DEFAULT_DISK_SIZE
+  disk_type   = opt['c'] || disk_type || DEFAULT_DISK_TYPE
+  die 'OS type must be specified (-f or -o)' if os_type.nil?
+  die 'ISO file must be specified (-f or -i)' if iso_file.nil?
+  require_iso(iso_file)
   check_vm_doesnt_exist(host_name)
-  register_vm(host_name,os_type)
-  add_controller_to_vm(host_name,disk_type,controller)
-  create_hdd(disk_name,disk_size)
-  add_hdd_to_vm(host_name,disk_type,disk_name)
-  add_iso_to_vm(host_name,disk_type,iso_file)
-  add_memory_to_vm(host_name,memory_size)
-  socket_name = add_socket_to_vm(host_name)
+  disk_name = File.join(get_vm_dir(host_name), "#{host_name}.vdi")
+  register_vm(host_name, os_type)
+  add_controller_to_vm(host_name, disk_type, get_controller(disk_type))
+  create_hdd(disk_name, disk_size)
+  add_hdd_to_vm(host_name, disk_type, disk_name)
+  add_iso_to_vm(host_name, disk_type, iso_file)
+  add_memory_to_vm(host_name, memory_size)
+  add_socket_to_vm(host_name)
   add_serial_to_vm(host_name)
-  exit
 end
+
+# Routines to build a VM
 
 def boot_vm(host_name)
-  command = "VBoxManage startvm #{host_name} --type headless"
-  system("#{command}")
-  return
+  vbox!('startvm', host_name, '--type', 'headless')
 end
 
-# If not creating a machine, build it
-# Handle opening socket and exception if socket doesn't exist
+def valid_ip?(address)
+  address.match?(/\A\d+\.\d+\.\d+\.\d+\z/) && address.split('.').all? { |octet| octet.to_i <= 255 }
+end
 
-def build_vm(host_name,os_type)
+# Ask for a host value, using the default if nothing is given or $yes_to_all is set
+
+def ask(name, field)
+  return field[:default] if $yes_to_all
+
+  loop do
+    print "#{field[:label]} [#{field[:default]}]: "
+    answer = ($stdin.gets || '').strip
+    answer = field[:default] if answer.empty?
+    if field[:valid] && !field[:valid].include?(answer)
+      puts "Valid answers are: #{field[:valid].join(',')}"
+    elsif IP_FIELDS.include?(name) && !valid_ip?(answer)
+      puts 'Invalid IP Address'
+    else
+      return answer
+    end
+  end
+end
+
+# Build the VM: ask for host values, boot headless and let the OS method
+# drive the install over the serial socket
+
+def build_vm(host_name, os_type)
+  check_method(os_type)
   check_vm_exists(host_name)
   shutdown_vm(host_name)
-  host_value   = {}
-  host_default = {
-    "ip"=>["IP Address","192.168.1.2",""],
-    "netmask"     => ["Netmask","255.255.255.0",""],
-    "gateway"     => ["Gateway","192.168.1.254",""],
-    "domain"      => ["Domain","home.net",""],
-    "nameservice" => ["Name Service","DNS","NIS+,NIS,DNS,LDAP,None"],
-    "nameserver"  => ["Name Server","192.168.1.254",""],
-    "timezone"    => ["Time Zone","Australia",""],
-    "region"      => ["Geographic Region","Australasia",""],
-    "state"       => ["Victoria","Victoria",""],
-    "password"    => ["Password","penguins",""],
-    "filesystem"  => ["Filesystem","ZFS","ZFS,UFS"]
-  }
-  host_default.each do |name,value|
-    question = value[0]
-    default  = value[1]
-    valid    = value[2]
-    if $yes_to_all == 1
-      answer  = default
-      correct = 1
-    else
-      correct = 0
-    end
-    while correct != 1 do
-      print "#{question} [#{default}]: "
-      answer = gets.chomp
-      if valid =~ /[A-z]|[0-9]/
-        if answer !~ /[A-z]|[0-9]/
-          answer = default
-        end
-        if valid !~/#{answer}/
-          puts "Valid answers are: #{valid}"
-          correct = 0
-        else
-          correct = 1
-        end
-      else
-        if answer !~ /[A-z]|[0-9]/
-          answer  = default
-          correct = 1
-        else
-          if name =~/ip|netmask|gateway|nameserver/
-            test = answer.split('.').map(&:to_i)
-            if test[0] > 255 || test[1] > 255 || test[2] > 255 || test[3] > 255 || answer =~ /[A-z]/
-              puts "Invalid IP Address"
-              correct = 0
-            end
-          else
-            correct = 1
-          end
-        end
-      end
-    end
-    if name =~ /ip/
-      if answer != default
-        new_gateway             = answer.split('.')
-        new_gateway             = "#{new_gateway[0]}.#{new_gateway[1]}.#{new_gateway[2]}.254"
-        host_default['gateway'] = ["#{question}","#{new_gateway}"]
-      end
-    end
+  prompts    = HOST_PROMPTS.transform_values(&:dup)
+  host_value = {}
+  prompts.each do |name, field|
+    answer = ask(name, field)
+    # Default the gateway to .254 on the same subnet as a non-default IP
+    prompts['gateway'][:default] = "#{answer.split('.')[0, 3].join('.')}.254" if name == 'ip' && answer != field[:default]
     host_value[name] = answer
   end
   boot_vm(host_name)
-  eval("process_serial_#{os_type}(host_name,host_value)")
+  send("process_serial_#{os_type}", host_name, host_value)
 end
 
-# If given a -b build VM
+# Code to check for an updated version of the script from git
 
-if opt["b"]
-  host_name = opt["n"]
-  os_type   = opt["f"]
-  build_vm(host_name,os_type)
-  exit
+def update_script
+  url = "https://raw.githubusercontent.com/lateralblast/#{CODE_NAME}/master/version"
+  begin
+    remote_version = URI.open(url, &:read).chomp
+  rescue StandardError => e
+    die "Could not check remote version: #{e.message}"
+  end
+  puts
+  puts 'Checking for updated version of script...'
+  puts
+  puts "Local version:  #{VERSION}"
+  puts "Remote version: #{remote_version}"
+  puts
+  local_parts  = VERSION.split('.').map(&:to_i)
+  remote_parts = remote_version.split('.').map(&:to_i)
+  puts "Remote and local versions of #{CODE_NAME} are the same" if remote_parts == local_parts
+  puts "Remote version of #{CODE_NAME} is greater" if (remote_parts <=> local_parts).positive?
+  puts
 end
 
+def parse_options
+  Getopt::Std.getopts(OPTIONS)
+rescue StandardError
+  print_usage(1)
+end
+
+def main
+  opt = parse_options
+  print_usage(1) if opt.empty?
+  print_usage if opt['h']
+  $verbose    = true if opt['z']
+  $yes_to_all = true if opt['y']
+  return print_octal if opt['O']
+  return puts(VERSION) if opt['v']
+  return print_verbose_version if opt['V']
+  return update_script if opt['u']
+  return vbox!('list', 'vms') if opt['l']
+  return vbox!('list', 'ostypes') if opt['o'] == 'list'
+  return attach_cd_to_vm(opt['n'], opt['i']) if opt['i'] && !opt['m']
+  return remove_vm(opt['n']) if opt['e']
+
+  if opt['s']
+    require_host_name(opt['n'])
+    return shutdown_vm(opt['n'])
+  end
+  return create_vm(opt) if opt['m']
+  return build_vm(opt['n'], opt['f']) if opt['b']
+
+  print_usage(1)
+end
+
+main if $PROGRAM_NAME == __FILE__
